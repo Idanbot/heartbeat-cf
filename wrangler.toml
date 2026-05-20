@@ -1,0 +1,13 @@
+name = "device-heartbeat-monitor"
+main = "src/index.js"
+compatibility_date = "2026-05-20"
+
+kv_namespaces = [
+  { binding = "DEVICES", id = "6271a62ec41f43b79833548c16481e61" },
+]
+
+[vars]
+HEARTBEAT_TIMEOUT_SECONDS = "300"
+
+[triggers]
+crons = ["*/1 * * * *"]
