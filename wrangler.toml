@@ -7,7 +7,7 @@ kv_namespaces = [
 ]
 
 [vars]
-HEARTBEAT_TIMEOUT_SECONDS = "300"
+HEARTBEAT_TIMEOUT_SECONDS = "900"
 
 [triggers]
 crons = ["*/1 * * * *"]

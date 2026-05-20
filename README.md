@@ -1,6 +1,6 @@
 # Device Heartbeat Monitor
 
-Cloudflare Worker that records device heartbeats in KV and sends a Telegram alert when a device reports down or misses the heartbeat timeout.
+Cloudflare Worker that records device heartbeats in KV and sends a Telegram alert only after a device has had no healthy heartbeat for the configured timeout.
 
 ## Endpoints
 
@@ -19,7 +19,7 @@ curl -fsS -X POST "$CF_WORKER_URL/heartbeat" \
 
 ## Configuration
 
-`wrangler.toml` defines the Worker, cron trigger, and `DEVICES` KV binding. Runtime secrets must be set through Wrangler secrets:
+`wrangler.toml` defines the Worker, cron trigger, `DEVICES` KV binding, and `HEARTBEAT_TIMEOUT_SECONDS`. The default timeout is 900 seconds, so alerts wait for 15 minutes without a healthy heartbeat. Repeated `heartbeat=0` reports keep the device marked down, but they do not reset the 15-minute alert window. Runtime secrets must be set through Wrangler secrets:
 
 ```sh
 wrangler secret put HEARTBEAT_TOKEN
