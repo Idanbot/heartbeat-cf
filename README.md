@@ -1,6 +1,6 @@
 # Device Heartbeat Monitor
 
-Cloudflare Worker that records device heartbeats in KV and sends a Telegram alert only after a device has had no healthy heartbeat for the configured timeout.
+Cloudflare Worker that records device heartbeats in D1 and sends a Telegram alert only after a device has had no healthy heartbeat for the configured timeout.
 
 ## Endpoints
 
@@ -19,7 +19,16 @@ curl -fsS -X POST "$CF_WORKER_URL/heartbeat" \
 
 ## Configuration
 
-`wrangler.toml` defines the Worker, cron trigger, `DEVICES` KV binding, and `HEARTBEAT_TIMEOUT_SECONDS`. The default timeout is 900 seconds, so alerts wait for 15 minutes without a healthy heartbeat. Repeated `heartbeat=0` reports keep the device marked down, but they do not reset the 15-minute alert window. Runtime secrets must be set through Wrangler secrets:
+`wrangler.toml` defines the Worker, cron trigger, `DB` D1 binding, and `HEARTBEAT_TIMEOUT_SECONDS`. The default timeout is 1800 seconds, so alerts wait for 30 minutes without a healthy heartbeat. Repeated `heartbeat=0` reports keep the device marked down, but they do not reset the 30-minute alert window. Healthy heartbeats clear any previous alert state.
+
+Create the D1 database, copy its `database_id` into `wrangler.toml`, and apply the migration:
+
+```sh
+wrangler d1 create device-heartbeat-monitor
+wrangler d1 migrations apply device-heartbeat-monitor --remote
+```
+
+Runtime secrets must be set through Wrangler secrets:
 
 ```sh
 wrangler secret put HEARTBEAT_TOKEN
@@ -34,7 +43,15 @@ export CF_WORKER_URL="https://device-heartbeat-monitor.example.workers.dev"
 export HEARTBEAT_TOKEN="replace-with-a-long-random-token"
 ```
 
-Do not commit `.env`, `.dev.vars`, `.wrangler`, or Miniflare SQLite state. They are ignored because they can contain account data, local state, or secrets.
+Run the client every 5 minutes. With D1 this is comfortably inside the free tier for a small number of devices, and it gives a 30-minute alert window six chances to receive a healthy heartbeat before alerting. For example, with cron:
+
+```cron
+*/5 * * * * /path/to/heartbeat.sh
+```
+
+The Worker no longer uses KV-backed rate limiting because that consumed a write on every request. The heartbeat endpoint is protected by `HEARTBEAT_TOKEN`. For stronger protection against malicious traffic before it reaches the Worker, add Cloudflare WAF or account-level rate limiting rules for `/heartbeat` and `/status`.
+
+Do not commit `.env`, `.dev.vars`, `.wrangler`, or local D1/Miniflare state. They are ignored because they can contain account data, local state, or secrets.
 
 ## Local Development
 

@@ -1,5 +1,4 @@
-const DEVICE_PREFIX = "device:";
-const ALERT_PREFIX = "alert:down:";
+const DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 1800;
 
 export default {
   async fetch(request, env, ctx) {
@@ -52,10 +51,9 @@ async function handleHeartbeat(request, env, ctx) {
   }
 
   const heartbeatRaw = body.heartbeat ?? url.searchParams.get("heartbeat") ?? 1;
-
   const heartbeat = normalizeHeartbeat(heartbeatRaw);
-  const devices = getDevicesNamespace(env);
-  const previousRecord = await devices.get(DEVICE_PREFIX + id, { type: "json" });
+  const db = getDatabase(env);
+  const previousRecord = await getDevice(db, id);
   const nowIso = new Date().toISOString();
 
   const record = {
@@ -72,123 +70,157 @@ async function handleHeartbeat(request, env, ctx) {
       heartbeat === 1
         ? null
         : previousRecord?.unavailable_since_timestamp || nowIso,
+    alert_sent_at:
+      heartbeat === 1 ? null : previousRecord?.alert_sent_at || null,
   };
 
-  await devices.put(DEVICE_PREFIX + id, JSON.stringify(record));
+  await upsertDevice(db, record);
 
-  if (heartbeat === 1) {
-    await devices.delete(ALERT_PREFIX + id);
-  } else {
+  if (heartbeat === 0) {
     ctx.waitUntil(checkDeviceForDownAlert(env, record));
   }
 
   return json({
     ok: true,
-    device: record,
+    device: publicDeviceRecord(env, record),
   });
 }
 
 async function listDevices(env) {
-  const devices = getDevicesNamespace(env);
-  const now = Date.now();
-  const timeoutMs = Number(env.HEARTBEAT_TIMEOUT_SECONDS || 120) * 1000;
+  const db = getDatabase(env);
+  const result = await db
+    .prepare(
+      `SELECT id,
+              name,
+              heartbeat,
+              last_timestamp,
+              last_healthy_timestamp,
+              unavailable_since_timestamp,
+              alert_sent_at
+         FROM devices
+        ORDER BY id`,
+    )
+    .all();
 
-  const records = [];
-
-  let cursor;
-  do {
-    const options = { prefix: DEVICE_PREFIX };
-    if (cursor) options.cursor = cursor;
-
-    const result = await devices.list(options);
-
-    for (const key of result.keys) {
-      const record = await devices.get(key.name, { type: "json" });
-      if (!record) continue;
-
-      const lastHealthyTimestamp =
-        record.last_healthy_timestamp ||
-        (Number(record.heartbeat) === 1 ? record.last_timestamp : null);
-      const lastHealthyMs = Date.parse(lastHealthyTimestamp);
-      const fresh =
-        Number.isFinite(lastHealthyMs) && now - lastHealthyMs <= timeoutMs;
-
-      records.push({
-        id: record.id,
-        name: record.name,
-        heartbeat: fresh && Number(record.heartbeat) === 1 ? 1 : 0,
-        last_timestamp: record.last_timestamp,
-        last_healthy_timestamp: lastHealthyTimestamp,
-        unavailable_since_timestamp: record.unavailable_since_timestamp || null,
-      });
-    }
-
-    cursor = result.cursor;
-    if (result.list_complete) break;
-  } while (cursor);
-
-  records.sort((a, b) => a.id.localeCompare(b.id));
-  return records;
+  return (result.results || []).map((record) => publicDeviceRecord(env, record));
 }
 
 async function checkForDownDevices(env) {
-  const devices = getDevicesNamespace(env);
+  const db = getDatabase(env);
+  const result = await db
+    .prepare(
+      `SELECT id,
+              name,
+              heartbeat,
+              last_timestamp,
+              last_healthy_timestamp,
+              unavailable_since_timestamp,
+              alert_sent_at
+         FROM devices`,
+    )
+    .all();
 
-  let cursor;
-  do {
-    const options = { prefix: DEVICE_PREFIX };
-    if (cursor) options.cursor = cursor;
-
-    const result = await devices.list(options);
-
-    for (const key of result.keys) {
-      const record = await devices.get(key.name, { type: "json" });
-      if (!record) continue;
-
-      if (isDevicePastHeartbeatTimeout(env, record)) {
-        await sendDownAlertOnce(env, record, "no healthy heartbeat within timeout");
-      } else {
-        await devices.delete(ALERT_PREFIX + record.id);
-      }
+  for (const record of result.results || []) {
+    if (isDevicePastHeartbeatTimeout(env, record)) {
+      await sendDownAlertOnce(env, record, "no healthy heartbeat within timeout");
     }
-
-    cursor = result.cursor;
-    if (result.list_complete) break;
-  } while (cursor);
-}
-
-async function checkDeviceForDownAlert(env, record) {
-  const devices = getDevicesNamespace(env);
-
-  if (isDevicePastHeartbeatTimeout(env, record)) {
-    await sendDownAlertOnce(env, record, "no healthy heartbeat within timeout");
-  } else {
-    await devices.delete(ALERT_PREFIX + record.id);
   }
 }
 
+async function checkDeviceForDownAlert(env, record) {
+  if (isDevicePastHeartbeatTimeout(env, record)) {
+    await sendDownAlertOnce(env, record, "no healthy heartbeat within timeout");
+  }
+}
+
+async function getDevice(db, id) {
+  return db
+    .prepare(
+      `SELECT id,
+              name,
+              heartbeat,
+              last_timestamp,
+              last_healthy_timestamp,
+              unavailable_since_timestamp,
+              alert_sent_at
+         FROM devices
+        WHERE id = ?`,
+    )
+    .bind(id)
+    .first();
+}
+
+async function upsertDevice(db, record) {
+  await db
+    .prepare(
+      `INSERT INTO devices (
+         id,
+         name,
+         heartbeat,
+         last_timestamp,
+         last_healthy_timestamp,
+         unavailable_since_timestamp,
+         alert_sent_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         heartbeat = excluded.heartbeat,
+         last_timestamp = excluded.last_timestamp,
+         last_healthy_timestamp = excluded.last_healthy_timestamp,
+         unavailable_since_timestamp = excluded.unavailable_since_timestamp,
+         alert_sent_at = excluded.alert_sent_at`,
+    )
+    .bind(
+      record.id,
+      record.name,
+      record.heartbeat,
+      record.last_timestamp,
+      record.last_healthy_timestamp,
+      record.unavailable_since_timestamp,
+      record.alert_sent_at,
+    )
+    .run();
+}
+
+function publicDeviceRecord(env, record) {
+  const lastHealthyTimestamp =
+    record.last_healthy_timestamp ||
+    (Number(record.heartbeat) === 1 ? record.last_timestamp : null);
+  const fresh = isTimestampFresh(env, lastHealthyTimestamp);
+
+  return {
+    id: record.id,
+    name: record.name,
+    heartbeat: fresh && Number(record.heartbeat) === 1 ? 1 : 0,
+    last_timestamp: record.last_timestamp,
+    last_healthy_timestamp: lastHealthyTimestamp,
+    unavailable_since_timestamp: record.unavailable_since_timestamp || null,
+    alert_sent_at: record.alert_sent_at || null,
+  };
+}
+
 function isDevicePastHeartbeatTimeout(env, record) {
-  const timeoutMs = Number(env.HEARTBEAT_TIMEOUT_SECONDS || 120) * 1000;
   const lastHealthyTimestamp =
     record.last_healthy_timestamp ||
     (Number(record.heartbeat) === 1 ? record.last_timestamp : null);
   const referenceTimestamp =
     lastHealthyTimestamp || record.unavailable_since_timestamp || record.last_timestamp;
-  const referenceMs = Date.parse(referenceTimestamp);
+
+  return !isTimestampFresh(env, referenceTimestamp);
+}
+
+function isTimestampFresh(env, timestamp) {
+  const referenceMs = Date.parse(timestamp);
 
   if (!Number.isFinite(referenceMs)) {
-    return true;
+    return false;
   }
 
-  return Date.now() - referenceMs > timeoutMs;
+  return Date.now() - referenceMs <= heartbeatTimeoutSeconds(env) * 1000;
 }
 
 async function sendDownAlertOnce(env, device, reason) {
-  const devices = getDevicesNamespace(env);
-  const alertKey = ALERT_PREFIX + device.id;
-  const alreadyAlerted = await devices.get(alertKey);
-
-  if (alreadyAlerted) return;
+  if (device.alert_sent_at) return;
 
   const text =
     "🚨 Tunnel/device down\n" +
@@ -207,7 +239,10 @@ async function sendDownAlertOnce(env, device, reason) {
 
   await sendTelegram(env, text);
 
-  await devices.put(alertKey, new Date().toISOString());
+  await getDatabase(env)
+    .prepare("UPDATE devices SET alert_sent_at = ? WHERE id = ? AND alert_sent_at IS NULL")
+    .bind(new Date().toISOString(), device.id)
+    .run();
 }
 
 async function sendTelegram(env, text) {
@@ -236,6 +271,11 @@ async function sendTelegram(env, text) {
   }
 }
 
+function heartbeatTimeoutSeconds(env) {
+  const value = Number(env.HEARTBEAT_TIMEOUT_SECONDS || DEFAULT_HEARTBEAT_TIMEOUT_SECONDS);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_HEARTBEAT_TIMEOUT_SECONDS;
+}
+
 function normalizeHeartbeat(value) {
   if (value === true || value === 1) return 1;
 
@@ -247,21 +287,22 @@ function normalizeHeartbeat(value) {
   return 0;
 }
 
-function getDevicesNamespace(env) {
-  if (!env.DEVICES) {
-    throw new Error("Missing DEVICES KV binding");
+function getDatabase(env) {
+  if (!env.DB) {
+    throw new Error("Missing DB D1 binding");
   }
 
-  return env.DEVICES;
+  return env.DB;
 }
 
-function json(data, status = 200) {
+function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
       "access-control-allow-origin": "*",
+      ...headers,
     },
   });
 }
