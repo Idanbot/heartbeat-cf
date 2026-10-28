@@ -4,13 +4,29 @@ const ALERT_CLAIM_SECONDS = 120;
 const ALERT_BATCH_SIZE = 10;
 const MAX_BODY_BYTES = 4096;
 const DEVICE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+const PUBLIC_CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, OPTIONS",
+};
 const REFERENCE_TIMESTAMP =
   "COALESCE(last_healthy_timestamp, unavailable_since_timestamp, last_timestamp)";
 
 export default {
   async fetch(request, env, ctx) {
+    let publicRequest = false;
     try {
       const url = new URL(request.url);
+      publicRequest = env.PUBLIC_STATUS_ENABLED === "true" &&
+        ["/", "/public/status"].includes(url.pathname);
+      if (publicRequest) {
+        if (request.method === "OPTIONS") {
+          return new Response(null, { status: 204, headers: PUBLIC_CORS_HEADERS });
+        }
+        if (request.method !== "GET") {
+          return json({ error: "method_not_allowed" }, 405, { ...PUBLIC_CORS_HEADERS, allow: "GET, OPTIONS" });
+        }
+        return json(await listPublicDevices(env), 200, PUBLIC_CORS_HEADERS);
+      }
       if (["/", "/status", "/health"].includes(url.pathname)) {
         if (request.method !== "GET") return methodNotAllowed("GET");
         const denied = authorize(request, env.STATUS_TOKEN, "x-status-token");
@@ -40,10 +56,10 @@ export default {
       return json({ error: "not_found" }, 404);
     } catch (error) {
       if (error instanceof InputError) {
-        return json({ error: error.message }, error.status);
+        return json({ error: error.message }, error.status, publicRequest ? PUBLIC_CORS_HEADERS : {});
       }
       console.error({ event: "request_failed", error: error.name });
-      return json({ error: "service_unavailable" }, 503);
+      return json({ error: "service_unavailable" }, 503, publicRequest ? PUBLIC_CORS_HEADERS : {});
     }
   },
 
@@ -51,6 +67,25 @@ export default {
     ctx.waitUntil(checkForDownDevices(env));
   },
 };
+
+async function listPublicDevices(env) {
+  const ids = [...new Set((env.PUBLIC_DEVICE_IDS || "").split(",").map((id) => id.trim()).filter(Boolean))];
+  if (ids.length > 100 || ids.some((id) => !DEVICE_ID_PATTERN.test(id))) {
+    throw new Error("Invalid public device allowlist");
+  }
+  if (!ids.length) return [];
+  const result = await getDatabase(env).prepare(
+    `SELECT id, name, heartbeat, last_timestamp, last_healthy_timestamp, unavailable_since_timestamp
+       FROM devices WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id LIMIT 100`,
+  ).bind(...ids).all();
+  const now = Date.now();
+  return result.results.map((record) => ({
+    id: record.id,
+    name: record.name,
+    heartbeat: publicDeviceRecord(env, record, now).heartbeat,
+    last_timestamp: record.last_timestamp,
+  }));
+}
 
 async function handleHeartbeat(request, env, ctx, url) {
   const body =

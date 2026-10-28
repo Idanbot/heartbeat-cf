@@ -16,6 +16,8 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+!.env.windows.example.json
+!.env.deploy.example.json
 *.pem
 *.key
 *.p12

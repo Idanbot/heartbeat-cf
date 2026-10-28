@@ -3,9 +3,14 @@ set -euo pipefail
 
 : "${CF_WORKER_URL:?Set CF_WORKER_URL}"
 : "${HEARTBEAT_TOKEN:?Set HEARTBEAT_TOKEN}"
-: "${HEALTHCHECK_URL:?Set HEALTHCHECK_URL to a health endpoint served through the tunnel}"
+health_mode=${HEALTHCHECK_MODE:-tunnel}
+case "$health_mode" in
+  tunnel) : "${HEALTHCHECK_URL:?Set HEALTHCHECK_URL to a health endpoint served through the tunnel}" ;;
+  services|tailscale) ;;
+  *) printf 'Invalid HEALTHCHECK_MODE\n' >&2; exit 1 ;;
+esac
 
-if [[ $CF_WORKER_URL != https://* || $HEALTHCHECK_URL != https://* ]]; then
+if [[ $CF_WORKER_URL != https://* || ( $health_mode == tunnel && $HEALTHCHECK_URL != https://* ) ]]; then
   printf 'Worker and health-check URLs must use HTTPS\n' >&2
   exit 1
 fi
@@ -20,9 +25,19 @@ done
 device_id=${HEARTBEAT_DEVICE_ID:-pi4}
 device_name=${HEARTBEAT_DEVICE_NAME:-$device_id}
 service_name=${CLOUDFLARED_SERVICE:-cloudflared}
-heartbeat=0
+heartbeat=1
+read -r -a service_names <<<"${HEARTBEAT_SERVICES:-$service_name}"
+if [[ $health_mode == tailscale ]]; then
+  read -r -a service_names <<<"${HEARTBEAT_SERVICES:-tailscaled}"
+fi
+for service in "${service_names[@]}"; do
+  if ! systemctl is-active --quiet "$service"; then
+    printf 'Required service is inactive: %s\n' "$service" >&2
+    heartbeat=0
+  fi
+done
 
-if systemctl is-active --quiet "$service_name"; then
+if [[ $heartbeat == 1 && $health_mode == tunnel ]]; then
   if health_status=$(curl --fail --silent --show-error --location --max-redirs 3 \
     --proto '=https' --proto-redir '=https' --connect-timeout 5 --max-time 10 \
     --retry 1 --retry-delay 1 --retry-max-time 15 \
@@ -31,9 +46,16 @@ if systemctl is-active --quiet "$service_name"; then
     heartbeat=1
   else
     printf 'Tunnel HTTP health check failed\n' >&2
+    heartbeat=0
   fi
-else
-  printf 'Tunnel service is inactive: %s\n' "$service_name" >&2
+fi
+
+if [[ $heartbeat == 1 && $health_mode == tailscale ]]; then
+  if ! command -v tailscale >/dev/null ||
+    ! tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null; then
+    printf 'Tailscale is not authenticated/running\n' >&2
+    heartbeat=0
+  fi
 fi
 
 payload=$(jq -cn --arg id "$device_id" --arg name "$device_name" \

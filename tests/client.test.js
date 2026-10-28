@@ -13,12 +13,16 @@ function runClient(t, overrides = {}) {
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const callsPath = join(directory, "calls.jsonl");
   writeFileSync(callsPath, "");
-  for (const tool of ["curl", "systemctl"]) {
+  for (const tool of ["curl", "systemctl", "tailscale"]) {
     writeFileSync(join(directory, tool), `#!/usr/bin/env node
 const { appendFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 appendFileSync(process.env.MOCK_CALLS, JSON.stringify({ tool: ${JSON.stringify(tool)}, args }) + "\\n");
 if (${JSON.stringify(tool)} === "systemctl") process.exit(Number(process.env.MOCK_SERVICE_EXIT || 0));
+if (${JSON.stringify(tool)} === "tailscale") {
+  process.stdout.write(JSON.stringify({ BackendState: process.env.MOCK_TAILSCALE_STATE || "Running" }));
+  process.exit(0);
+}
 if (args.includes("--data")) {
   process.stdout.write(process.env.MOCK_POST_BODY || '{"ok":true,"persisted":true}');
   process.exit(Number(process.env.MOCK_POST_EXIT || 0));
@@ -103,4 +107,27 @@ test("missing health URL and insecure endpoints fail before sending credentials"
   const insecure = runClient(t, { CF_WORKER_URL: "http://monitor.example" });
   assert.equal(insecure.status, 1);
   assert.equal(insecure.calls.length, 0);
+});
+
+test("service-only mode needs no HTTP endpoint and checks all required services", (t) => {
+  const result = runClient(t, { HEALTHCHECK_MODE: "services", HEALTHCHECK_URL: "", HEARTBEAT_SERVICES: "cloudflared ssh" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.payload.heartbeat, 1);
+  assert.equal(result.calls.filter(c => c.tool === "systemctl").length, 2);
+  assert.equal(result.calls.filter(c => c.tool === "curl").length, 1);
+});
+
+test("Tailscale mode distinguishes an active daemon from an expired or missing login", (t) => {
+  for (const state of ["Running", "NeedsLogin", "Stopped"]) {
+    const result = runClient(t, { HEALTHCHECK_MODE: "tailscale", HEALTHCHECK_URL: "", MOCK_TAILSCALE_STATE: state });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.payload.heartbeat, state === "Running" ? 1 : 0);
+    assert(result.calls.some(c => c.tool === "tailscale"));
+  }
+});
+
+test("unknown probe modes fail closed before sending a heartbeat", (t) => {
+  const result = runClient(t, { HEALTHCHECK_MODE: "unknown" });
+  assert.equal(result.status, 1);
+  assert.equal(result.calls.length, 0);
 });

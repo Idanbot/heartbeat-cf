@@ -10,6 +10,8 @@ database_id = "cf6e5215-eaae-4770-81e5-739ab04f299b"
 [vars]
 HEARTBEAT_TIMEOUT_SECONDS = "1800"
 HEARTBEAT_WRITE_INTERVAL_SECONDS = "300"
+PUBLIC_STATUS_ENABLED = "true"
+PUBLIC_DEVICE_IDS = "pi4,pc1,t420,oci-micro"
 
 [triggers]
 crons = ["*/5 * * * *"]

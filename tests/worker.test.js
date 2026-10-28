@@ -340,6 +340,51 @@ test("status is authenticated, paginated, and hides private delivery fields", as
   assert.equal((await stale.json())[0].heartbeat, 0);
 });
 
+test("opt-in public feed supports the existing website without exposing private fields or unlisted devices", async (t) => {
+  const h = harness(t);
+  await h.beat(1, "pi4", "Public Pi");
+  await h.beat(1, "hidden", "Private machine");
+  h.env.PUBLIC_STATUS_ENABLED = "true";
+  h.env.PUBLIC_DEVICE_IDS = "pi4";
+  for (const path of ["/", "/public/status"]) {
+    const response = await h.request(path, { headers: { origin: "https://portfolio.example" } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("access-control-allow-origin"), "*");
+    assert.equal(response.headers.get("access-control-allow-credentials"), null);
+    assert.deepEqual(await response.json(), [{
+      id: "pi4", name: "Public Pi", heartbeat: 1, last_timestamp: new Date(START).toISOString(),
+    }]);
+  }
+  const before = { ...h.row() };
+  assert.equal((await h.request("/public/status", { method: "POST" })).status, 405);
+  const preflight = await h.request("/public/status", { method: "OPTIONS" });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-methods"), "GET, OPTIONS");
+  for (const path of ["/status", "/health", "/heartbeat"]) {
+    assert.equal((await h.request(path)).status, 401);
+  }
+  assert.deepEqual({ ...h.row() }, before);
+  h.tick(30 * MINUTE + 1);
+  assert.equal((await (await h.request("/public/status")).json())[0].heartbeat, 0);
+});
+
+test("public feed fails closed by default, with an empty allowlist, and on configuration/storage errors", async (t) => {
+  const h = harness(t);
+  assert.equal((await h.request("/")).status, 401);
+  assert.equal((await h.request("/public/status")).status, 404);
+  assert.equal(h.database.queries.length, 0);
+  h.env.PUBLIC_STATUS_ENABLED = "true";
+  assert.deepEqual(await (await h.request("/public/status")).json(), []);
+  assert.equal(h.database.queries.length, 0);
+  h.env.PUBLIC_DEVICE_IDS = "bad id";
+  const invalid = await h.request("/public/status");
+  assert.equal(invalid.status, 503);
+  assert.equal(invalid.headers.get("access-control-allow-origin"), "*");
+  h.env.PUBLIC_DEVICE_IDS = "pi4";
+  delete h.env.DB;
+  assert.equal((await h.request("/public/status")).status, 503);
+});
+
 test("authentication rejects URL tokens and separates read/write access before D1", async (t) => {
   const h = harness(t);
   const cases = [
