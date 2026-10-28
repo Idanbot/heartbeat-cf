@@ -1,0 +1,3 @@
+HEARTBEAT_TOKEN=local-heartbeat-token
+STATUS_TOKEN=local-status-token
+# Add Telegram secrets only when intentionally testing real notifications.

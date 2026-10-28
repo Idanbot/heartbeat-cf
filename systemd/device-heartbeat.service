@@ -1,0 +1,16 @@
+[Unit]
+Description=Device and tunnel heartbeat
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/device-heartbeat.env
+ExecStart=/usr/bin/bash /opt/device-heartbeat/heartbeat.sh
+TimeoutStartSec=100
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

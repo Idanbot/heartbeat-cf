@@ -9,6 +9,7 @@ database_id = "cf6e5215-eaae-4770-81e5-739ab04f299b"
 
 [vars]
 HEARTBEAT_TIMEOUT_SECONDS = "1800"
+HEARTBEAT_WRITE_INTERVAL_SECONDS = "300"
 
 [triggers]
 crons = ["*/5 * * * *"]

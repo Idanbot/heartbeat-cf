@@ -1,0 +1,11 @@
+[Unit]
+Description=Send a device heartbeat every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=1s
+Unit=device-heartbeat.service
+
+[Install]
+WantedBy=timers.target
